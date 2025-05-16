@@ -70,5 +70,3 @@ Exemples:
 ## Sécurité
 Ce script nécessite un accès SSH par clé aux serveurs surveillés. Assurez-vous de configurer correctement les clés SSH pour l'utilisateur qui exécutera le script.
 
-## License
-Ce script est distribué sous licence MIT.
