@@ -7,7 +7,7 @@ Version: 2.6
 ## Description
 Script de surveillance d'espace disque pour serveurs Linux. Vérifie l'espace disque sur plusieurs serveurs via SSH et envoie des alertes par email.
 
-## Exemple de rapport mail
+## Exemple de rapport mail reçu par email
 
 Pour voir un exemple de rapport HTML généré par ce script:
 
