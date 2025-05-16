@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Rapport d'espace disque - 2025-05-16 14:30:25</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #333366;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #666699;
+            margin-top: 20px;
+            border-left: 4px solid #6666aa;
+            padding-left: 10px;
+        }
+        h3 {
+            color: #6666aa;
+            margin-top: 15px;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-bottom: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            position: sticky;
+            top: 0;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .normal {
+            background-color: #e6ffe6;
+        }
+        .warning {
+            background-color: #ffffcc;
+        }
+        .critical {
+            background-color: #ffcccc;
+        }
+        .inode-normal {
+            background-color: #e6f3ff;
+        }
+        .inode-warning {
+            background-color: #ccebff;
+        }
+        .inode-critical {
+            background-color: #b3e0ff;
+        }
+        .big-dirs {
+            background-color: #f2f2f2;
+            padding: 10px;
+            margin-top: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+        pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+        .server-summary {
+            margin-top: 30px;
+            padding: 10px;
+            background-color: #f8f8f8;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Rapport d'espace disque - 2025-05-16 14:30:25</h1>
+    <p>Généré par monitor-disk-space.sh version 2.6 sur le serveur monitor-central</p>
+    <p><em>Note: Des seuils personnalisés peuvent être définis pour chaque serveur dans le fichier de configuration.</em></p>
+
+    <h2>Serveur: webserver-prod01</h2>
+    <table>
+        <tr><th>Point de montage</th><th>Partition</th><th>Taille</th><th>Utilisé</th><th>Disponible</th><th>Utilisation</th></tr>
+        <tr class="normal"><td>/</td><td>/dev/xvda1</td><td>50G</td><td>27G</td><td>23G</td><td>54%</td></tr>
+        <tr class="warning"><td>/var</td><td>/dev/xvdb1</td><td>100G</td><td>78G</td><td>22G</td><td>78%</td></tr>
+        <tr class="normal"><td>/home</td><td>/dev/xvdc1</td><td>200G</td><td>85G</td><td>115G</td><td>42%</td></tr>
+    </table>
+    
+    <h3>Utilisation des inodes</h3>
+    <table>
+        <tr><th>Point de montage</th><th>Partition</th><th>Inodes</th><th>IUtilisés</th><th>ILibres</th><th>IUtil%</th></tr>
+        <tr class="inode-normal"><td>/</td><td>/dev/xvda1</td><td>3276800</td><td>154732</td><td>3122068</td><td>5%</td></tr>
+        <tr class="inode-warning"><td>/var</td><td>/dev/xvdb1</td><td>6553600</td><td>4912700</td><td>1640900</td><td>75%</td></tr>
+        <tr class="inode-normal"><td>/home</td><td>/dev/xvdc1</td><td>13107200</td><td>1423512</td><td>11683688</td><td>11%</td></tr>
+    </table>
+
+    <h3>Les plus grands répertoires de webserver-prod01 (calculés le 2025-05-16)</h3>
+    <div class="big-dirs">
+        <pre>
+Partition: /
+2.4G    /usr
+1.8G    /var/lib
+967M    /var/log
+
+Partition: /var
+42G     /var/www/html
+21G     /var/lib/mysql
+8.3G    /var/cache/nginx
+
+Partition: /home
+32G     /home/webadmin/backups
+24G     /home/webadmin/media
+17G     /home/webadmin/uploads
+</pre>
+    </div>
+
+    <h3>Les plus grands fichiers de webserver-prod01 (calculés le 2025-05-16)</h3>
+    <div class="big-dirs">
+        <pre>
+Partition: /
+254M    /usr/lib/firefox/firefox
+187M    /usr/lib/chromium-browser/chromium-browser
+89M     /var/log/nginx/access.log
+
+Partition: /var
+4.2G    /var/lib/mysql/ibdata1
+3.8G    /var/www/html/wp-content/uploads/product-catalog.zip
+2.1G    /var/www/html/media/videos/presentation.mp4
+
+Partition: /home
+12G     /home/webadmin/backups/site-backup-2025-05-15.tar.gz
+8.4G    /home/webadmin/backups/db-backup-2025-05-15.sql.gz
+6.2G    /home/webadmin/media/promotional-video-2025.mp4
+</pre>
+    </div>
+
+    <h2>Serveur: dbserver-prod03</h2>
+    <table>
+        <tr><th>Point de montage</th><th>Partition</th><th>Taille</th><th>Utilisé</th><th>Disponible</th><th>Utilisation</th></tr>
+        <tr class="normal"><td>/</td><td>/dev/sda1</td><td>80G</td><td>32G</td><td>48G</td><td>40%</td></tr>
+        <tr class="critical"><td>/var</td><td>/dev/sdb1</td><td>500G</td><td>465G</td><td>35G</td><td>93%</td></tr>
+        <tr class="normal"><td>/data</td><td>/dev/sdc1</td><td>2T</td><td>1.2T</td><td>800G</td><td>60%</td></tr>
+    </table>
+
+    <h3>Utilisation des inodes</h3>
+    <table>
+        <tr><th>Point de montage</th><th>Partition</th><th>Inodes</th><th>IUtilisés</th><th>ILibres</th><th>IUtil%</th></tr>
+        <tr class="inode-normal"><td>/</td><td>/dev/sda1</td><td>5242880</td><td>287432</td><td>4955448</td><td>5%</td></tr>
+        <tr class="inode-normal"><td>/var</td><td>/dev/sdb1</td><td>32768000</td><td>12589321</td><td>20178679</td><td>38%</td></tr>
+        <tr class="inode-normal"><td>/data</td><td>/dev/sdc1</td><td>131072000</td><td>42895631</td><td>88176369</td><td>33%</td></tr>
+    </table>
+
+    <h3>Les plus grands répertoires de dbserver-prod03 (calculés le 2025-05-16)</h3>
+    <div class="big-dirs">
+        <pre>
+Partition: /
+3.1G    /usr
+2.3G    /var/lib
+1.2G    /opt
+
+Partition: /var
+387G    /var/lib/postgresql
+47G     /var/lib/mysql
+12G     /var/log
+
+Partition: /data
+754G    /data/postgresql/main
+389G    /data/backups
+32G     /data/exports
+</pre>
+    </div>
+
+    <h3>Les plus grands fichiers de dbserver-prod03 (calculés le 2025-05-16)</h3>
+    <div class="big-dirs">
+        <pre>
+Partition: /
+345M    /opt/monitoring/agent.jar
+211M    /usr/local/bin/docker
+98M     /var/log/syslog.1
+
+Partition: /var
+42G     /var/lib/postgresql/14/main/base/16384/1237
+38G     /var/lib/postgresql/14/main/base/16384/5782
+24G     /var/lib/postgresql/14/main/base/16384/3521
+
+Partition: /data
+125G    /data/backups/full_backup_2025-05-12.tar.gz
+97G     /data/backups/full_backup_2025-05-05.tar.gz
+86G     /data/postgresql/main/pg_wal/00000001000000D50000009A
+</pre>
+    </div>
+
+    <h2>Serveur: appserver-dev02</h2>
+    <table>
+        <tr><th>Point de montage</th><th>Partition</th><th>Taille</th><th>Utilisé</th><th>Disponible</th><th>Utilisation</th></tr>
+        <tr class="normal"><td>/</td><td>/dev/nvme0n1p1</td><td>200G</td><td>68G</td><td>132G</td><td>34%</td></tr>
+        <tr class="normal"><td>/var</td><td>/dev/nvme1n1p1</td><td>300G</td><td>124G</td><td>176G</td><td>41%</td></tr>
+        <tr class="normal"><td>/opt</td><td>/dev/nvme2n1p1</td><td>500G</td><td>217G</td><td>283G</td><td>43%</td></tr>
+    </table>
+
+    <h3>Les plus grands répertoires de appserver-dev02 (calculés le 2025-05-16)</h3>
+    <div class="big-dirs">
+        <pre>
+Partition: /
+24G     /usr
+12G     /var/lib
+8.7G    /home
+
+Partition: /var
+87G     /var/lib/docker
+18G     /var/log
+11G     /var/cache
+
+Partition: /opt
+145G    /opt/development/projects
+42G     /opt/development/packages
+21G     /opt/testing/results
+</pre>
+    </div>
+
+    <h3>Les plus grands fichiers de appserver-dev02 (calculés le 2025-05-16)</h3>
+    <div class="big-dirs">
+        <pre>
+Partition: /
+654M    /usr/lib/jvm/java-17-openjdk-amd64/lib/modules
+412M    /usr/local/bin/node
+256M    /usr/share/dotnet/dotnet
+
+Partition: /var
+4.8G    /var/lib/docker/overlay2/8a7e8fcb2b48d8e5a7354d4c7ab9578e872b5b63f8a4bca8c92c429a0126c4a7/diff/var/lib/mysql/ibdata1
+3.2G    /var/log/app/debug.log.1
+2.7G    /var/lib/docker/overlay2/9b2c6f43d5a42f89a22d6b26e5d86785e12a27d7f8c921ae14d0fa9c9c463c97/diff/opt/application/uploads/test-data.tar.gz
+
+Partition: /opt
+18G     /opt/development/projects/project-alpha/node_modules
+12G     /opt/development/projects/project-beta/target/project-beta.jar
+7.5G    /opt/testing/results/performance-test-results-2025-05-10.pcap
+</pre>
+    </div>
+
+    <hr>
+    <h2>Temps de traitement par serveur</h2>
+    <table>
+        <tr><th>Serveur</th><th>Temps</th></tr>
+        <tr><td>dbserver-prod03</td><td>2m 47s</td></tr>
+        <tr><td>webserver-prod01</td><td>1m 38s</td></tr>
+        <tr><td>appserver-dev02</td><td>1m 12s</td></tr>
+    </table>
+
+    <hr>
+    <p><em>Durée d'exécution : 5 minute(s) et 42 seconde(s)</em></p>
+</body>
+</html>
