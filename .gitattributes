@@ -1,0 +1,2 @@
+*.sh linguist-language=Bash
+monitor-disk-space.sh linguist-language=Bash
