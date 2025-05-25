@@ -1,3 +1,4 @@
+#
 #!/bin/bash
 #
 # monitor-disk-space.sh - Surveillance de l'espace disque sur plusieurs serveurs via SSH avec alertes par email
@@ -41,7 +42,7 @@
 # - Format du fichier server-disk-space.conf:
 #   serveur:partitions:seuil_warning:seuil_critical
 #   Exemples:
-#     serveur1                     # Vérifie / avec seuils par défaut
+#     serveur1:/                   # Vérifie / avec seuils par défaut
 #     serveur2:/var,/home          # Vérifie / et les partitions spécifiées
 #     serveur3:/var:60:85          # Vérifie / et /var avec seuils personnalisés
 # - Les résultats des analyses de grands répertoires/fichiers sont mis en cache
@@ -273,6 +274,51 @@
 # - Priorité donnée aux options de tri sur les autres fonctionnalités pour une meilleure expérience utilisateur
 # - Initialisation explicite de la variable VALIDATION_MODE à false par défaut
 # - Optimisation du flux d'exécution pour éviter les traitements inutiles en mode tri d'utilisation
+#
+# [21 mai 2025] v 2.6.6
+# - Amélioration de la compatibilité avec macOS (Darwin) pour la surveillance des serveurs Apple
+# - Détection automatique du système d'exploitation via la commande uname
+# - Adaptation des commandes df et du traitement des sorties selon le système d'exploitation détecté
+# - Correction de l'affichage des points de montage sur macOS avec gestion appropriée des colonnes
+# - Ajout de fonctions spécifiques (detect_os, get_disk_info) pour gérer les différences entre OS
+#
+# [22 mai 2025] v 2.6.7
+# - Correction du problème d'affichage des noms de serveurs incluant un utilisateur SSH
+# - Modification de la fonction build_display_name pour n'afficher que le nom du serveur sans l'utilisateur
+# - Conservation des informations d'utilisateur pour la connexion SSH tout en améliorant l'affichage
+# - Meilleure documentation pour la gestion des serveurs avec authentification user@serveur
+# - Mise à jour de l'aide pour clarifier le format de configuration et l'affichage des rapports
+# - Correction de bugs mineurs dans la génération des rapports HTML
+# - Amélioration de la détection des systèmes macOS (prise en charge des volumes APFS)
+# - Optimisation des commandes SSH pour réduire la charge réseau
+# - Ajout de la version du script dans les en-têtes de rapport
+# - Correction des calculs d'espace pour les systèmes avec des unités en TiB/GiB
+# - Standardisation du formatage des tailles de disque dans les rapports
+#
+# [22 mai 2025] v 2.6.8
+# - Ajout de l'affichage de la commande complète utilisée pour lancer le script dans tous les rapports
+# - Modification de tous les rapports HTML (principal, validation, tri d'utilisation, consolidés) 
+#   pour inclure la commande avec ses options dans la ligne "Généré par..."
+# - Ajout de la variable FULL_COMMAND pour capturer automatiquement "$0 $*"
+# - Amélioration de la traçabilité : possibilité de savoir exactement quelle commande a généré quel rapport
+# - Mise à jour des fonctions show_sorted_usage, generate_validation_report et send_consolidated_reports
+# - Correction de la fonction list_servers dupliquée (suppression de la version simplifiée)
+#
+# [24 mai 2025] v 2.6.9 
+# - CORRECTION CRITIQUE: Bug de duplication des partitions dans check_disk_space() et show_sorted_usage()
+# - Suppression de la logique défaillante "partitions="/ $additional_partitions""
+# - Les partitions spécifiées dans le fichier de config ne sont plus ajoutées à "/" par défaut
+# - Utilisation d'un tableau pour traiter les partitions multiples (IFS=',' read -ra PARTITION_ARRAY)
+# - Nettoyage automatique des espaces dans les noms de partitions
+# - Vérification et omission des partitions vides
+# - AMÉLIORATION: Cohérence entre check_disk_space() et show_sorted_usage()
+# - Application de la même logique de traitement des partitions dans les deux fonctions
+# - Les options -U et -u n'affichent plus de doublons
+# - AMÉLIORATION: Simplification du format de fichier de configuration
+# - Plus de filesystem par défaut ajouté automatiquement
+# - Le fichier de config spécifie exactement les partitions à vérifier
+# - Format plus prévisible : une partition listée = une vérification
+#
 
 # Vérifier qu'une seule instance du script s'exécute à la fois
 LOCK_FILE="/var/lock/monitor-disk-space.lock"
@@ -289,7 +335,7 @@ flock -n 200 || {
 CONFIG_FILE="/usr/local/etc/disk-monitor.conf"
 
 # Variables de configuration par défaut (seront écrasées si définies dans le fichier de config)
-VERSION="2.6.5"
+VERSION="2.6.8"
 SCRIPT_NAME=$(basename "$0")
 SERVER_LIST="/usr/local/etc/server-disk-space.conf"
 SERVER_LIST_TEST="/usr/local/etc/server-disk-space-test.conf"
@@ -347,11 +393,14 @@ NUM_BIG_DIRS=3
 # Nombre de grands fichiers à afficher (par défaut: 3)
 NUM_BIG_FILES=3
 # Activation du calcul des grands répertoires (par défaut: activé)
-CALC_BIG_DIRS=true
+CALC_BIG_DIRS=false
 # Activation du calcul des grands fichiers (par défaut: activé)
-CALC_BIG_FILES=true
+CALC_BIG_FILES=false
 # Nombre de jours avant recalcul des grands répertoires/fichiers (par défaut: 7)
 CALC_DAYS=7
+
+# Capturer la commande complète utilisée pour lancer le script
+FULL_COMMAND="$0 $*"
 
 # Enregistrer l'heure de début
 START_TIME=$(date +%s)
@@ -557,6 +606,77 @@ validate_configuration() {
     fi
 }
 
+# Fonction pour construire un nom d'affichage à partir d'un serveur et d'un utilisateur
+build_display_name() {
+    local server_name="$1"
+    local ssh_user="$2"
+    echo "${server_name}"
+}
+
+# Fonction pour extraire le nom d'utilisateur, le nom du serveur et ses attributs
+extract_server_info() {
+    local server_config="$1"
+    local server_name=""
+    local ssh_user=""
+    
+    # Vérifier si un nom d'utilisateur est spécifié (format user@server)
+    if [[ "$server_config" =~ @ ]]; then
+        ssh_user=$(echo "$server_config" | cut -d'@' -f1)
+        server_name=$(echo "$server_config" | cut -d'@' -f2 | cut -d':' -f1)
+    else
+        server_name=$(echo "$server_config" | cut -d':' -f1)
+        ssh_user="" # Utilisateur SSH par défaut (celui qui exécute le script)
+    fi
+    
+    echo "$server_name $ssh_user"
+}
+
+# Fonction pour construire la commande SSH avec l'utilisateur approprié
+build_ssh_command() {
+    local server_name="$1"
+    local ssh_user="$2"
+    
+    if [[ -n "$ssh_user" ]]; then
+        echo "ssh ${ssh_user}@${server_name}"
+    else
+        echo "ssh ${server_name}"
+    fi
+}
+
+# Fonction pour détecter le système d'exploitation d'un serveur
+detect_os() {
+    local server_name="$1"
+    local ssh_user="$2"
+    local ssh_cmd=""
+    
+    ssh_cmd=$(build_ssh_command "$server_name" "$ssh_user")
+    
+    # Exécuter uname pour déterminer l'OS
+    local os_type=$($ssh_cmd "uname" 2>/dev/null)
+    
+    # Retourner "Darwin" pour macOS, sinon "Linux" ou autre
+    echo "$os_type"
+}
+
+# Fonction pour obtenir les informations de disque adaptées à l'OS
+get_disk_info() {
+    local server_name="$1"
+    local ssh_user="$2"
+    local os_type="$3"
+    local partition="$4"
+    local ssh_cmd=""
+    
+    ssh_cmd=$(build_ssh_command "$server_name" "$ssh_user")
+    
+    if [[ "$os_type" == "Darwin" ]]; then
+        # Format macOS - extraction adaptée
+        $ssh_cmd "df -h '$partition' 2>/dev/null | awk 'NR>1 {print \$1\"|\"\$2\"|\"\$3\"|\"\$4\"|\"\$5\"|\"\$9}'" | head -1
+    else
+        # Format Linux standard
+        $ssh_cmd "LC_ALL=C df -h '$partition' 2>/dev/null | grep -v '^Filesystem' | grep -v '^Sys.' | awk '{print \$1\"|\"\$2\"|\"\$3\"|\"\$4\"|\"\$5\"|\$6}'" | head -1
+    fi
+}
+
 # Fonction pour générer un rapport HTML détaillé des résultats de validation et l'envoyer par email
 generate_validation_report() {
     local -n status_ref=$1   # Référence au tableau associatif des statuts
@@ -597,8 +717,7 @@ generate_validation_report() {
 </head>
 <body>
     <h1>Rapport de validation de configuration - $DATE</h1>
-    <p>Généré par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME</p>
-    
+    <p>Généré par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME avec la commande $FULL_COMMAND</p>
     <h2>Résultats des tests de serveurs</h2>
     <table>
         <tr>
@@ -767,8 +886,16 @@ EOF
 
 # Fonction pour valider le format d'un nom de serveur
 validate_server_name() {
-    local server="$1"
+    local server_config="$1"
     local validation_mode="$2"  # "strict" ou "warn"
+    
+    # Extraire le nom du serveur (après @ s'il existe)
+    local server=""
+    if [[ "$server_config" =~ @ ]]; then
+        server=$(echo "$server_config" | cut -d'@' -f2)
+    else
+        server="$server_config"
+    fi
     
     # Vérification de base (pas vide, pas de caractères spéciaux interdits)
     if [[ -z "$server" || ! "$server" =~ ^[a-zA-Z0-9._-]+$ ]]; then
@@ -853,7 +980,7 @@ show_sorted_usage() {
 </head>
 <body>
     <h1>Utilisation des disques triee - $DATE</h1>
-    <p>Genere par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME</p>
+    <p>Genere par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME avec la commande $FULL_COMMAND</p>
 EOF
     
     # Ajouter une note en mode test
@@ -913,34 +1040,47 @@ EOF
         # Ajouter un saut de ligne avant le traitement de chaque serveur
         log "" # Ajoute une ligne vide dans les logs
 
-	# Extraire le nom du serveur (avant le premier ':' s'il existe) pour le ping
-        server=$(echo "$server_line" | cut -d':' -f1 | tr -d '[:space:]')
-        log "Collecte des données pour $server"
+        # Extraire le nom du serveur et l'utilisateur SSH
+        server_info=$(extract_server_info "$server_line")
+        server_name=$(echo "$server_info" | cut -d' ' -f1)
+        ssh_user=$(echo "$server_info" | cut -d' ' -f2)
+        
+        # Utiliser uniquement le nom du serveur pour l'affichage
+        display_name="$server_name"
+        
+        log "Collecte des données pour $display_name"
         
         # Vérifier si le serveur est accessible (utiliser seulement le nom de serveur pour le ping)
-        if ! check_server_reachable "$server"; then
-            log "Le serveur $server n'est pas accessible, ignoré"
+        if ! check_server_reachable "$server_name"; then
+            log "Le serveur $display_name n'est pas accessible, ignoré"
             continue
         fi
         
-        # Déterminer les partitions à vérifier et les seuils
-        partitions="/"
-        server_warning=$WARNING_THRESHOLD
-        server_critical=$CRITICAL_THRESHOLD
+        # Déterminer les partitions à vérifier et les seuils - CORRECTION DU BUG
+        local partitions=""
+        local server_warning=$WARNING_THRESHOLD
+        local server_critical=$CRITICAL_THRESHOLD
         
         # Chercher la configuration du serveur
-        if grep -q "^${server}:" "$SERVER_LIST"; then
-            local server_config=$(grep "^${server}:" "$SERVER_LIST")
-            
-            # Extraire les partitions supplémentaires
-            local additional_partitions=$(echo "$server_config" | cut -d':' -f2)
-            if [ ! -z "$additional_partitions" ]; then
-                partitions="/ $additional_partitions"
+        local server_config_line=""
+        if [[ -n "$ssh_user" ]]; then
+            server_config_line=$(grep "^${ssh_user}@${server_name}:" "$SERVER_LIST" || echo "")
+        else
+            server_config_line=$(grep "^${server_name}:" "$SERVER_LIST" || echo "")
+        fi
+        
+        if [[ -n "$server_config_line" ]]; then
+            # Extraire les partitions (champ 2)
+            local field2=$(echo "$server_config_line" | cut -d':' -f2)
+            if [ ! -z "$field2" ]; then
+                partitions="$field2"
+            else
+                partitions="/"
             fi
             
             # Extraire les seuils personnalisés
-            local custom_warning=$(echo "$server_config" | cut -d':' -f3)
-            local custom_critical=$(echo "$server_config" | cut -d':' -f4)
+            local custom_warning=$(echo "$server_config_line" | cut -d':' -f3)
+            local custom_critical=$(echo "$server_config_line" | cut -d':' -f4)
             
             if [[ ! -z "$custom_warning" && "$custom_warning" =~ ^[0-9]+$ ]]; then
                 server_warning=$custom_warning
@@ -949,43 +1089,104 @@ EOF
             if [[ ! -z "$custom_critical" && "$custom_critical" =~ ^[0-9]+$ ]]; then
                 server_critical=$custom_critical
             fi
+        else
+            partitions="/"
         fi
         
-        log "Partitions pour $server: $partitions, Seuils: $server_warning% / $server_critical%"
+        log "Partitions pour $display_name: $partitions, Seuils: $server_warning% / $server_critical%"
         
-        # Pour chaque partition
-        for partition in $partitions; do
-            log "Vérification de la partition $partition sur $server"
+        # Construire la commande SSH avec l'utilisateur approprié
+        local ssh_cmd=""
+        if [[ -n "$ssh_user" ]]; then
+            ssh_cmd="ssh ${ssh_user}@${server_name}"
+        else
+            ssh_cmd="ssh ${server_name}"
+        fi
+        
+        # Détecter le système d'exploitation
+        local os_type=$($ssh_cmd "uname" 2>/dev/null)
+        log "Système d'exploitation détecté pour $display_name: $os_type"
+        
+        # Traiter les partitions séparées par des virgules
+        IFS=',' read -ra PARTITION_ARRAY <<< "$partitions"
+        for partition in "${PARTITION_ARRAY[@]}"; do
+            # Supprimer les espaces éventuels
+            partition=$(echo "$partition" | tr -d '[:space:]')
             
-            # Exécuter la commande df avec une approche plus fiable
-            # Utiliser LC_ALL=C pour assurer un format standard et filtrer l'en-tête
-            df_cmd="ssh $server \"LC_ALL=C df -h $partition 2>/dev/null | grep -v '^Filesystem' | grep -v '^Sys.' | head -1\""
-            df_output=$(eval "$df_cmd")
-            
-            if [ -z "$df_output" ]; then
-                log "Aucune donnée reçue pour $server:$partition"
+            # Ignorer les partitions vides
+            if [[ -z "$partition" ]]; then
                 continue
+            fi
+            
+            log "Vérification de la partition $partition sur $display_name"
+            
+            local df_output=""
+            local filesystem=""
+            local size=""
+            local used=""
+            local avail=""
+            local usage_str=""
+            local usage_percent=""
+            local mount_point=""
+            
+            # Adapter la commande en fonction du système d'exploitation
+            if [[ "$os_type" == "Darwin" ]]; then
+                # Version macOS de la commande df
+                df_output=$($ssh_cmd "df -h '$partition'" 2>/dev/null | grep -v "Filesystem" | head -1)
+                
+                if [ ! -z "$df_output" ]; then
+                    # Extraction adaptée pour macOS
+                    filesystem=$(echo "$df_output" | awk '{print $1}')
+                    size=$(echo "$df_output" | awk '{print $2}')
+                    used=$(echo "$df_output" | awk '{print $3}')
+                    avail=$(echo "$df_output" | awk '{print $4}')
+                    usage_str=$(echo "$df_output" | awk '{print $5}')
+                    
+                    # Sur macOS, le point de montage est en dernière position (peut être après colonne 9)
+                    mount_point=$(echo "$df_output" | awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
+                    
+                    # Si le point de montage est vide, essayer d'autres méthodes
+                    if [ -z "$mount_point" ]; then
+                        mount_point=$(echo "$df_output" | awk '{print $9}')
+                    fi
+                    
+                    # Si toujours vide, utiliser la partition spécifiée
+                    if [ -z "$mount_point" ]; then
+                        mount_point="$partition"
+                    fi
+                else
+                    log "ERREUR: Aucune donnée reçue pour $display_name:$partition"
+                    continue
+                fi
+            else
+                # Version Linux standard avec LC_ALL=C pour standardiser le format de sortie
+                df_output=$($ssh_cmd "LC_ALL=C df -h '$partition'" 2>/dev/null | grep -v '^Filesystem' | grep -v '^Sys.' | head -1)
+                
+                if [ ! -z "$df_output" ]; then
+                    # Extraire proprement les informations avec awk
+                    filesystem=$(echo "$df_output" | awk '{print $1}')
+                    size=$(echo "$df_output" | awk '{print $2}')
+                    used=$(echo "$df_output" | awk '{print $3}')
+                    avail=$(echo "$df_output" | awk '{print $4}')
+                    usage_str=$(echo "$df_output" | awk '{print $5}')
+                    
+                    # Récupérer le point de montage (qui peut contenir des espaces)
+                    mount_point=$(echo "$df_output" | awk '{for(i=6;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
+                    
+                    # Si le point de montage est vide, utiliser la partition
+                    if [ -z "$mount_point" ]; then
+                        mount_point="$partition"
+                    fi
+                else
+                    log "ERREUR: Aucune donnée reçue pour $display_name:$partition"
+                    continue
+                fi
             fi
             
             log "Données reçues: $df_output"
             
-            # Utiliser awk pour extraire proprement les champs
-            filesystem=$(echo "$df_output" | awk '{print $1}')
-            size=$(echo "$df_output" | awk '{print $2}')
-            used=$(echo "$df_output" | awk '{print $3}')
-            avail=$(echo "$df_output" | awk '{print $4}')
-            usage_str=$(echo "$df_output" | awk '{print $5}')
-            
             # Enlever le % du pourcentage d'utilisation
             usage_percent=${usage_str%\%}
-            
-            # Récupérer le point de montage (qui peut contenir des espaces)
-            mount_point=$(echo "$df_output" | awk '{for(i=6;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
-            
-            # Si le point de montage est vide, utiliser la partition
-            if [ -z "$mount_point" ]; then
-                mount_point="$partition"
-            fi
             
             # Vérifier que les données sont valides
             if [[ -n "$filesystem" && -n "$size" && -n "$used" && -n "$avail" && "$usage_percent" =~ ^[0-9]+$ ]]; then
@@ -997,12 +1198,12 @@ EOF
                     status_class="warning"
                 fi
                 
-                # Ajouter au fichier de tri
-                echo "$usage_percent|$server|$mount_point|$filesystem|$size|$used|$avail|$status_class" >> "$output_file"
+                # Ajouter au fichier de tri avec le nom d'affichage corrigé
+                echo "$usage_percent|$display_name|$mount_point|$filesystem|$size|$used|$avail|$status_class" >> "$output_file"
                 
-                log "Ajouté pour tri: $server:$mount_point = $usage_percent% ($status_class)"
+                log "Ajouté pour tri: $display_name:$mount_point = $usage_percent% ($status_class)"
             else
-                log "Données invalides pour $server:$partition - $df_output"
+                log "Données invalides pour $display_name:$partition - $df_output"
             fi
         done
     done
@@ -1193,19 +1394,56 @@ is_server_excluded() {
 
 # Fonction pour vérifier s'il y a des alertes
 check_for_alerts() {
-    local server=$1
+    local server_config="$1"
     
-    local ssh_output=$(ssh "$server" "df -h / | grep -v Filesystem" 2>&1)
+    # Extraire le nom du serveur et l'utilisateur SSH
+    local server_info=$(extract_server_info "$server_config")
+    local server_name=$(echo "$server_info" | cut -d' ' -f1)
+    local ssh_user=$(echo "$server_info" | cut -d' ' -f2)
+    
+    # Construire la commande SSH
+    local ssh_cmd=$(build_ssh_command "$server_name" "$ssh_user")
+    
+    # Détecter le système d'exploitation
+    local os_type=$(detect_os "$server_name" "$ssh_user")
+    
+    # Adapter la commande en fonction de l'OS
+    local ssh_output=""
+    if [[ "$os_type" == "Darwin" ]]; then
+        # Commande adaptée pour macOS
+        ssh_output=$($ssh_cmd "df -h / | awk 'NR>1{print \$5}'" 2>&1)
+    else
+        # Commande standard pour Linux
+        ssh_output=$($ssh_cmd "df -h / | grep -v Filesystem" 2>&1)
+    fi
+    
     if [ $? -eq 0 ]; then
-        local usage_str=$(echo "$ssh_output" | awk '{print $5}')
-        local usage_percent=$(echo "$usage_str" | grep -o '[0-9]*')
+        local usage_str=""
+        local usage_percent=""
+        
+        if [[ "$os_type" == "Darwin" ]]; then
+            # Extraction directe pour macOS
+            usage_str="$ssh_output"
+            usage_percent=$(echo "$usage_str" | sed 's/%//')
+        else
+            # Extraction standard pour Linux
+            usage_str=$(echo "$ssh_output" | awk '{print $5}')
+            usage_percent=$(echo "$usage_str" | grep -o '[0-9]*')
+        fi
 
         # Récupérer les seuils personnalisés
         local server_warning_threshold=$WARNING_THRESHOLD
         local server_critical_threshold=$CRITICAL_THRESHOLD
         
-        if grep -q "^${server}:" "$SERVER_LIST"; then
-            local server_line=$(grep "^${server}:" "$SERVER_LIST")
+        # Chercher la configuration du serveur avec l'utilisateur si spécifié
+        local server_line=""
+        if [[ -n "$ssh_user" ]]; then
+            server_line=$(grep "^${ssh_user}@${server_name}:" "$SERVER_LIST")
+        else
+            server_line=$(grep "^${server_name}:" "$SERVER_LIST")
+        fi
+        
+        if [[ -n "$server_line" ]]; then
             local field3=$(echo "$server_line" | cut -d':' -f3)
             local field4=$(echo "$server_line" | cut -d':' -f4)
             
@@ -1222,16 +1460,16 @@ check_for_alerts() {
         if [[ "$usage_percent" =~ ^[0-9]+$ ]]; then
             if [ "$usage_percent" -ge "$server_critical_threshold" ]; then
                 has_critical=true
-                log "[CRITIQUE] Détecté sur $server: $usage_percent% (seuil: $server_critical_threshold%)"
+                log "[CRITIQUE] Détecté sur $server_name: $usage_percent% (seuil: $server_critical_threshold%)"
             elif [ "$usage_percent" -ge "$server_warning_threshold" ]; then
                 has_warning=true
-                log "[WARNING] Détecté sur $server: $usage_percent% (seuil: $server_warning_threshold%)"
+                log "[WARNING] Détecté sur $server_name: $usage_percent% (seuil: $server_warning_threshold%)"
             fi
         else
-            log "AVERTISSEMENT: Impossible d'extraire le pourcentage d'utilisation pour $server (valeur: $usage_str)"
+            log "AVERTISSEMENT: Impossible d'extraire le pourcentage d'utilisation pour $server_name (valeur: $usage_str)"
         fi
     else
-        log "ERREUR: Impossible d'obtenir l'utilisation du disque pour $server, sortie SSH: $ssh_output"
+        log "ERREUR: Impossible d'obtenir l'utilisation du disque pour $server_name, sortie SSH: $ssh_output"
     fi
 }
 
@@ -1382,7 +1620,7 @@ send_consolidated_reports() {
 </head>
 <body>
     <h1>Liste consolidee des plus gros fichiers - $DATE</h1>
-    <p>Genere par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME</p>
+    <p>Genere par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME avec la commande $FULL_COMMAND</p>
 EOF
 
         # Ajouter une note en mode test
@@ -1590,7 +1828,7 @@ EOF
 </head>
 <body>
     <h1>Liste consolidee des plus gros repertoires - $DATE</h1>
-    <p>Genere par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME</p>
+    <p>Genere par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME avec la commande $FULL_COMMAND</p>
 EOF
 
         # Ajouter une note en mode test
@@ -1754,17 +1992,17 @@ show_help() {
     echo "Options:"
     echo "  -c, --critical [NOMBRE]        Seuil critique en pourcentage (par défaut: 90)"
     echo "  -C, --critical-email [EMAIL]   Email pour les alertes de niveau critique (par défaut: critique@exemple.com)"
-    echo "  -d, --days [NOMBRE]            Nombre de jours avant recalcul des grands répertoires/fichiers (par défaut: 7)"
-    echo "  -D, --no-dirs                  Désactive le calcul des grands répertoires"
+    echo "  -d, --dirs                     Active le calcul des grands répertoires (désactivé par défaut)"
+    echo "  --days [NOMBRE]                Nombre de jours avant recalcul des grands répertoires/fichiers (par défaut: 7)"
     echo "  -E, --exclude-servers \"LISTE\"  Liste de serveurs à exclure des calculs intensifs (format: \"serveur1,serveur2,...\")"
-    echo "  -f, --num-big-files [NOMBRE]   Nombre de grands fichiers à afficher (par défaut: 3)"
-    echo "  -F, --no-files                 Désactive le calcul des grands fichiers"
+    echo "  -f, --files                    Active le calcul des grands fichiers (désactivé par défaut)"
+    echo "  -F, --num-big-files [NOMBRE]   Nombre de grands fichiers à afficher (par défaut: 3)"
     echo "  -h, --help                     Affiche ce message d'aide"
     echo "  -I, --info-email [EMAIL]       Email pour les rapports sans alerte (par défaut: infos@exemple.com)"
     echo "  -l, --list-server              Liste les serveurs configurés"
     echo "  -m, --max-logs [NOMBRE]        Nombre maximal de fichiers logs à conserver (par défaut: 30)"
     echo "  -M, --mail-big-files [EMAIL]   Envoie une liste consolidée des plus gros fichiers par email"
-    echo "  -N, --validate-names [MODE]   : Validation des noms de serveurs (strict/warn/off, défaut: warn)"
+    echo "  -N, --validate-names [MODE]    Validation des noms de serveurs (strict/warn/off, défaut: warn)"
     echo "  -n, --num-big-dirs [NOMBRE]    Nombre de grands répertoires à afficher (par défaut: 3)"
     echo "  -P, --mail-big-dirs [EMAIL]    Envoie une liste consolidée des plus gros répertoires par email"
     echo "  -r, --rotate-logs              Active la rotation des fichiers logs"
@@ -1781,11 +2019,14 @@ show_help() {
     echo "  -x, --compress-logs            Active la compression des anciens fichiers logs"
     echo "  -X, --no-compress-logs         Désactive la compression des anciens fichiers logs"
     echo "  -z, --zero-calc                Réinitialise le calcul des plus grands répertoires et fichiers"
-    echo "  -Z, --validate-config          Vérifie la configuration et les connexions
-    echo
+    echo "  -Z, --validate-config          Vérifie la configuration et les connexions"
+    echo " "
     echo "Description:"
     echo "  Ce script vérifie l'espace disque de plusieurs serveurs via SSH"
     echo "  et envoie un rapport par email selon le niveau d'alerte détecté."
+    echo
+    echo "  Note: Par défaut, les calculs intensifs (grands répertoires/fichiers) sont désactivés."
+    echo "  Utilisez les options -d et -f pour les activer explicitement."
     echo
     echo "Format du fichier de configuration des serveurs:"
     echo "  serveur:partitions:seuil_warning:seuil_critical"
@@ -1793,60 +2034,14 @@ show_help() {
     echo "    serveur1                     # Vérifie seulement la partition / avec les seuils par défaut"
     echo "    serveur2:/var,/home          # Vérifie / et les partitions spécifiées avec les seuils par défaut"
     echo "    serveur3:/var:60:85          # Vérifie / et /var avec des seuils personnalisés (60% et 85%)"
+    echo "    user@serveur4:/data:70:90    # Connexion avec l'utilisateur spécifié et seuils personnalisés"
+    echo "    serge@mini.nojo.fr:/Volumes/Data  # Exemple pour un serveur macOS avec un utilisateur spécifique"
     exit 0
 }
 
 # Fonction pour afficher la version
 show_version() {
     echo "$SCRIPT_NAME version $VERSION"
-    exit 0
-}
-
-# Fonction pour lister les serveurs
-list_servers() {
-    if [ ! -f "$SERVER_LIST" ]; then
-        echo "Erreur: Fichier de liste de serveurs $SERVER_LIST introuvable."
-        exit 1
-    fi
-
-    if $TEST_MODE; then
-        echo "Mode TEST: Liste des serveurs configurés dans $SERVER_LIST:"
-    else
-        echo "Liste des serveurs configurés:"
-    fi
-    echo "-----------------------------"
-
-    while read -r line; do
-        # Ignorer les lignes vides et les commentaires
-        if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
-            continue
-        fi
-
-        # Vérifier si la ligne contient un nom de serveur valide
-        if [[ "$line" =~ ^[[:alnum:]._-]+ ]]; then
-            # Extraire le nom du serveur (avant le premier ':' s'il existe)
-            server=$(echo "$line" | cut -d':' -f1 | tr -d '[:space:]')
-
-            # Si le serveur a des partitions spécifiées (après le ':')
-            if [[ "$line" =~ : ]]; then
-                # Récupérer tout ce qui suit le premier ':'
-                partitions_part=$(echo "$line" | cut -d':' -f2-)
-
-                # Vérifier si des partitions sont spécifiées
-                if [[ -z "$partitions_part" || "$partitions_part" =~ ^[[:space:]]*$ ]]; then
-                    # Si rien n'est spécifié après ':', on suppose la partition racine
-                    echo "Serveur: $server   FS: /"
-                else
-                    # Sinon, on utilise les partitions spécifiées
-                    echo "Serveur: $server   FS: $partitions_part"
-                fi
-            else
-                # Pas de ':' dans la ligne, donc uniquement la partition racine
-                echo "Serveur: $server   FS: /"
-            fi
-        fi
-    done <"$SERVER_LIST"
-
     exit 0
 }
 
@@ -1861,21 +2056,25 @@ log() {
 
 # Fonction pour vérifier si un serveur est accessible par ping
 check_server_reachable() {
-    local server=$1
+    local server_config="$1"
     local ping_count=2
     local timeout=3
-
-    log "Vérification de l'accessibilité du serveur $server par ping"
-    ping -c $ping_count -W $timeout $server >/dev/null 2>&1
+    
+    # Extraire le nom du serveur et l'utilisateur
+    local server_info=$(extract_server_info "$server_config")
+    local server_name=$(echo "$server_info" | cut -d' ' -f1)
+    
+    log "Vérification de l'accessibilité du serveur $server_name par ping"
+    ping -c $ping_count -W $timeout $server_name >/dev/null 2>&1
     if [ $? -eq 0 ]; then
-        log "Le serveur $server est accessible"
+        log "Le serveur $server_name est accessible"
         return 0 # Serveur accessible
     else
-        log "ATTENTION: Le serveur $server n'est pas accessible par ping"
+        log "ATTENTION: Le serveur $server_name n'est pas accessible par ping"
         return 1 # Serveur inaccessible
     fi
 }
-
+    
 # Fonction pour vérifier si les grands répertoires doivent être calculés pour un serveur spécifique
 check_big_dirs_calculation() {
     local server=$1
@@ -1989,19 +2188,43 @@ extract_big_data() {
 
 # Fonction pour vérifier l'espace disque d'un serveur
 check_disk_space() {
-    local server=$1
+    local server_config=$1
     local partitions=""
     local additional_partitions=""
     local show_inodes=false
     local server_warning_threshold=$WARNING_THRESHOLD  # Valeur par défaut
     local server_critical_threshold=$CRITICAL_THRESHOLD  # Valeur par défaut
 
-    log "Vérification de l'espace disque pour le serveur $server"
+    # Extraire le nom du serveur et l'utilisateur SSH
+    local server_info=$(extract_server_info "$server_config")
+    local server_name=$(echo "$server_info" | cut -d' ' -f1)
+    local ssh_user=$(echo "$server_info" | cut -d' ' -f2)
+
+    local display_name=$(build_display_name "$server_name" "$ssh_user")
+
+    log "Vérification de l'espace disque pour le serveur $display_name"
     
-    # Chercher directement la ligne de configuration du serveur
-    if grep -q "^${server}:" "$SERVER_LIST"; then
-        local server_line=$(grep "^${server}:" "$SERVER_LIST")
-        
+    # Construire la commande SSH
+    local ssh_cmd=""
+    if [[ -n "$ssh_user" ]]; then
+        ssh_cmd="ssh ${ssh_user}@${server_name}"
+    else
+        ssh_cmd="ssh ${server_name}"
+    fi
+    
+    # Détecter le système d'exploitation
+    local os_type=$($ssh_cmd "uname" 2>/dev/null)
+    log "Système d'exploitation détecté pour $display_name: $os_type"
+    
+    # Chercher la configuration du serveur dans le fichier
+    local server_line=""
+    if [[ -n "$ssh_user" ]]; then
+        server_line=$(grep "^${ssh_user}@${server_name}:" "$SERVER_LIST" || echo "")
+    else
+        server_line=$(grep "^${server_name}:" "$SERVER_LIST" || echo "")
+    fi
+    
+    if [[ -n "$server_line" ]]; then
         log "Configuration trouvée: $server_line"
         
         # Extraire directement les champs par position
@@ -2009,89 +2232,140 @@ check_disk_space() {
         local field3=$(echo "$server_line" | cut -d':' -f3)
         local field4=$(echo "$server_line" | cut -d':' -f4)
         
-        # Vérification des partitions (champ 2)
-        additional_partitions="$field2"
-        if [ ! -z "$additional_partitions" ]; then
-            partitions="/ $additional_partitions"
-            log "Partitions supplémentaires trouvées pour $server: $additional_partitions"
+        # Vérification des partitions (champ 2) - CORRECTION DU BUG
+        if [ ! -z "$field2" ]; then
+            partitions="$field2"
+            log "Partitions spécifiées pour $display_name: $partitions"
         else
             partitions="/"
-            log "Aucune partition supplémentaire spécifiée pour $server, utilisation de la partition racine uniquement"
+            log "Aucune partition spécifiée pour $display_name, utilisation de la partition racine"
         fi
         
         # Vérification du seuil d'avertissement (champ 3)
         if [[ ! -z "$field3" && "$field3" =~ ^[0-9]+$ ]]; then
             server_warning_threshold="$field3"
-            log "Seuil d'avertissement personnalisé pour $server: $server_warning_threshold%"
+            log "Seuil d'avertissement personnalisé pour $display_name: $server_warning_threshold%"
         fi
         
         # Vérification du seuil critique (champ 4)
         if [[ ! -z "$field4" && "$field4" =~ ^[0-9]+$ ]]; then
             server_critical_threshold="$field4"
-            log "Seuil critique personnalisé pour $server: $server_critical_threshold%"
+            log "Seuil critique personnalisé pour $display_name: $server_critical_threshold%"
         fi
     else
         # Aucune configuration spécifique trouvée
         partitions="/"
-        log "Aucune configuration spécifique pour $server, utilisation de la partition racine uniquement"
+        log "Aucune configuration spécifique pour $display_name, utilisation de la partition racine uniquement"
     fi
 
     # Ajouter un titre pour le serveur dans le rapport
-    echo "<h2>Serveur: $server</h2>" >>"$TEMP_DIR/report.html"
+    echo "<h2>Serveur: $display_name</h2>" >>"$TEMP_DIR/report.html"
     echo "<table>" >>"$TEMP_DIR/report.html"
     echo "<tr><th>Point de montage</th><th>Partition</th><th>Taille</th><th>Utilisé</th><th>Disponible</th><th>Utilisation</th></tr>" >>"$TEMP_DIR/report.html"
 
-    # Vérifier l'espace disque pour chaque partition
-    for partition in $partitions; do
-        log "Vérification de la partition $partition sur $server"
+    # Traiter les partitions séparées par des virgules
+    IFS=',' read -ra PARTITION_ARRAY <<< "$partitions"
+    for partition in "${PARTITION_ARRAY[@]}"; do
+        # Supprimer les espaces éventuels
+        partition=$(echo "$partition" | tr -d '[:space:]')
+        
+        # Ignorer les partitions vides
+        if [[ -z "$partition" ]]; then
+            continue
+        fi
+        
+        log "Vérification de la partition $partition sur $display_name"
 
-        # Utiliser une commande SSH avec LC_ALL=C pour standardiser le format de sortie
-        local ssh_output=$(ssh "$server" "LC_ALL=C df -h $partition" 2>/dev/null | grep -v 'Filesystem' | grep -v '^Sys.' | head -1)
+        # Variables pour stocker les informations extraites
+        local filesystem=""
+        local size=""
+        local used=""
+        local avail=""
+        local usage_str=""
+        local usage_percent=""
+        local mount_point=""
 
-        if [ $? -eq 0 ] && [ ! -z "$ssh_output" ]; then
-            # Extraire proprement les informations avec awk
-            local filesystem=$(echo "$ssh_output" | awk '{print $1}')
-            local size=$(echo "$ssh_output" | awk '{print $2}')
-            local used=$(echo "$ssh_output" | awk '{print $3}')
-            local avail=$(echo "$ssh_output" | awk '{print $4}')
-            local usage_str=$(echo "$ssh_output" | awk '{print $5}')
+        # Adapter la commande en fonction du système d'exploitation
+        if [[ "$os_type" == "Darwin" ]]; then
+            # Version macOS de la commande df
+            local df_output=$($ssh_cmd "df -h '$partition'" 2>/dev/null | grep -v "Filesystem" | head -1)
             
-            # Récupérer le point de montage (qui peut contenir des espaces)
-            local mount_point=$(echo "$ssh_output" | awk '{for(i=6;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
-
-            # Si le point de montage est vide, utiliser la partition
-            if [ -z "$mount_point" ]; then
-                mount_point="$partition"
+            if [ ! -z "$df_output" ]; then
+                # Extraction adaptée pour macOS
+                filesystem=$(echo "$df_output" | awk '{print $1}')
+                size=$(echo "$df_output" | awk '{print $2}')
+                used=$(echo "$df_output" | awk '{print $3}')
+                avail=$(echo "$df_output" | awk '{print $4}')
+                usage_str=$(echo "$df_output" | awk '{print $5}')
+                # Sur macOS, le point de montage est en dernière position (peut être après colonne 9)
+                mount_point=$(echo "$df_output" | awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
+                
+                # Si le point de montage est vide, essayer des colonnes alternatives
+                if [ -z "$mount_point" ]; then
+                    mount_point=$(echo "$df_output" | awk '{print $9}')
+                fi
+                
+                # Si toujours vide, utiliser la partition spécifiée
+                if [ -z "$mount_point" ]; then
+                    mount_point="$partition"
+                fi
+            else
+                log "ERREUR: Aucune donnée reçue pour $display_name:$partition"
             fi
+        else
+            # Version Linux standard avec LC_ALL=C pour standardiser le format de sortie
+            local df_output=$($ssh_cmd "LC_ALL=C df -h '$partition'" 2>/dev/null | grep -v '^Filesystem' | grep -v '^Sys.' | head -1)
+            
+            if [ ! -z "$df_output" ]; then
+                # Extraire proprement les informations avec awk
+                filesystem=$(echo "$df_output" | awk '{print $1}')
+                size=$(echo "$df_output" | awk '{print $2}')
+                used=$(echo "$df_output" | awk '{print $3}')
+                avail=$(echo "$df_output" | awk '{print $4}')
+                usage_str=$(echo "$df_output" | awk '{print $5}')
+                
+                # Récupérer le point de montage (qui peut contenir des espaces)
+                mount_point=$(echo "$df_output" | awk '{for(i=6;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
+                
+                # Si le point de montage est vide, utiliser la partition
+                if [ -z "$mount_point" ]; then
+                    mount_point="$partition"
+                fi
+            else
+                log "ERREUR: Aucune donnée reçue pour $display_name:$partition"
+            fi
+        fi
 
-            # Extraire uniquement les chiffres du pourcentage
-            local usage_percent=$(echo "$usage_str" | sed 's/%//')
+        # Si des données ont été récupérées, les traiter
+        if [ ! -z "$df_output" ]; then
+            # Enlever le % du pourcentage d'utilisation
+            usage_percent=${usage_str%\%}
 
             local status_class="normal"
             # Vérifier que usage_percent est un nombre valide
             if [[ "$usage_percent" =~ ^[0-9]+$ ]]; then
                 if $SIMULATION_MODE; then
-                    log "SIMULATION : $server:$partition considéré comme étant à 95% d'utilisation (valeur réelle: $usage_percent%)"
+                    log "SIMULATION : $display_name:$partition considéré comme étant à 95% d'utilisation (valeur réelle: $usage_percent%)"
                     usage_percent=95
                 fi
                 if [ "$usage_percent" -ge "$server_critical_threshold" ]; then
                     status_class="critical"
-                    log "[CRITIQUE] $server:$partition est à $usage_percent% d'utilisation (seuil: $server_critical_threshold%)"
+                    log "[CRITIQUE] $display_name:$partition est à $usage_percent% d'utilisation (seuil: $server_critical_threshold%)"
                 elif [ "$usage_percent" -ge "$server_warning_threshold" ]; then
                     status_class="warning"
-                    log "[WARNING] $server:$partition est à $usage_percent% d'utilisation (seuil: $server_warning_threshold%)"
+                    log "[WARNING] $display_name:$partition est à $usage_percent% d'utilisation (seuil: $server_warning_threshold%)"
                 else
-                    log "Normal: $server:$partition est à $usage_percent% d'utilisation"
+                    log "Normal: $display_name:$partition est à $usage_percent% d'utilisation"
                 fi
             else
-                log "AVERTISSEMENT: Impossible d'extraire le pourcentage d'utilisation pour $server:$partition (valeur: $usage_str)"
-                usage_percent="0"
+                log "AVERTISSEMENT: Impossible d'extraire le pourcentage d'utilisation pour $display_name:$partition (valeur: $usage_str)"
+                usage_percent="N/A"
             fi
 
             # Ajouter la ligne au rapport pour ce serveur
             echo "<tr class=\"$status_class\"><td>$mount_point</td><td>$filesystem</td><td>$size</td><td>$used</td><td>$avail</td><td>$usage_percent%</td></tr>" >>"$TEMP_DIR/report.html"
         else
-            log "ERREUR: Impossible de vérifier la partition $partition sur $server"
+            log "ERREUR: Impossible de vérifier la partition $partition sur $display_name"
             echo "<tr class=\"critical\"><td>$partition</td><td colspan=\"5\">Erreur lors de la vérification</td></tr>" >>"$TEMP_DIR/report.html"
         fi
     done
@@ -2100,97 +2374,132 @@ check_disk_space() {
     echo "</table>" >>"$TEMP_DIR/report.html"
 
     # Vérifier l'utilisation des inodes et décider si on doit l'afficher
+    # (Cette partie varie selon l'OS)
     local display_inodes=false
     local inodes_html=""
 
-    # Préparer le début du HTML pour les inodes dans une variable
-    inodes_html+="<h3>Utilisation des inodes</h3>\n"
-    inodes_html+="<table>\n"
-    inodes_html+="<tr><th>Point de montage</th><th>Partition</th><th>Inodes</th><th>IUtilisés</th><th>ILibres</th><th>IUtil%</th></tr>\n"
+    if [[ "$os_type" != "Darwin" ]]; then
+        # Linux - gestion standard des inodes
+        # Préparer le début du HTML pour les inodes dans une variable
+        inodes_html+="<h3>Utilisation des inodes</h3>\n"
+        inodes_html+="<table>\n"
+        inodes_html+="<tr><th>Point de montage</th><th>Partition</th><th>Inodes</th><th>IUtilisés</th><th>ILibres</th><th>IUtil%</th></tr>\n"
 
-    for partition in $partitions; do
-        # Utiliser LC_ALL=C pour standardiser la sortie de df -i
-        local inode_info=$(ssh "$server" "LC_ALL=C df -i $partition" 2>/dev/null | grep -v 'Filesystem' | grep -v '^Sys.' | head -1)
-
-        if [ $? -eq 0 ] && [ ! -z "$inode_info" ]; then
-            local filesystem=$(echo "$inode_info" | awk '{print $1}')
-            local inodes=$(echo "$inode_info" | awk '{print $2}')
-            local iused=$(echo "$inode_info" | awk '{print $3}')
-            local ifree=$(echo "$inode_info" | awk '{print $4}')
-            local iusage_str=$(echo "$inode_info" | awk '{print $5}')
+        # Traiter les partitions pour les inodes aussi
+        IFS=',' read -ra PARTITION_ARRAY <<< "$partitions"
+        for partition in "${PARTITION_ARRAY[@]}"; do
+            # Supprimer les espaces éventuels
+            partition=$(echo "$partition" | tr -d '[:space:]')
             
-            # Récupérer le point de montage (qui peut contenir des espaces)
-            local mount_point=$(echo "$inode_info" | awk '{for(i=6;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
-            
-            # Si le point de montage est vide, utiliser la partition
-            if [ -z "$mount_point" ]; then
-                mount_point="$partition"
+            # Ignorer les partitions vides
+            if [[ -z "$partition" ]]; then
+                continue
             fi
             
-            # Extraire uniquement les chiffres du pourcentage
-            local iusage_percent=$(echo "$iusage_str" | sed 's/%//')
+            # Utiliser LC_ALL=C pour standardiser la sortie de df -i
+            local inode_info=$($ssh_cmd "LC_ALL=C df -i $partition" 2>/dev/null | grep -v 'Filesystem' | grep -v '^Sys.' | head -1)
 
-            # Vérifier que iusage_percent est un nombre valide
-            if [[ "$iusage_percent" =~ ^[0-9]+$ ]]; then
-                # Vérifier si le taux d'utilisation des inodes atteint 50%
-                if [ "$iusage_percent" -ge 50 ]; then
-                    display_inodes=true
-                    log "Utilisation des inodes élevée sur $server:$partition: $iusage_percent% (seuil: 50%)"
+            if [ $? -eq 0 ] && [ ! -z "$inode_info" ]; then
+                local filesystem=$(echo "$inode_info" | awk '{print $1}')
+                local inodes=$(echo "$inode_info" | awk '{print $2}')
+                local iused=$(echo "$inode_info" | awk '{print $3}')
+                local ifree=$(echo "$inode_info" | awk '{print $4}')
+                local iusage_str=$(echo "$inode_info" | awk '{print $5}')
+                
+                # Récupérer le point de montage (qui peut contenir des espaces)
+                local mount_point=$(echo "$inode_info" | awk '{for(i=6;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/ $//')
+                
+                # Si le point de montage est vide, utiliser la partition
+                if [ -z "$mount_point" ]; then
+                    mount_point="$partition"
+                fi
+                
+                # Extraire uniquement les chiffres du pourcentage
+                local iusage_percent=$(echo "$iusage_str" | sed 's/%//')
+
+                # Vérifier que iusage_percent est un nombre valide
+                if [[ "$iusage_percent" =~ ^[0-9]+$ ]]; then
+                    # Vérifier si le taux d'utilisation des inodes atteint 50%
+                    if [ "$iusage_percent" -ge 50 ]; then
+                        display_inodes=true
+                        log "Utilisation des inodes élevée sur $display_name:$partition: $iusage_percent% (seuil: 50%)"
+                    fi
+
+                    local istatus_class="inode-normal"
+                    if [ "$iusage_percent" -ge "$server_critical_threshold" ]; then
+                        istatus_class="inode-critical"
+                    elif [ "$iusage_percent" -ge "$server_warning_threshold" ]; then
+                        istatus_class="inode-warning"
+                    fi
+                else
+                    log "AVERTISSEMENT: Impossible d'extraire le pourcentage d'utilisation des inodes pour $display_name:$partition (valeur: $iusage_str)"
+                    iusage_percent="N/A"
+                    istatus_class="inode-normal"
                 fi
 
-                local istatus_class="inode-normal"
-                if [ "$iusage_percent" -ge "$server_critical_threshold" ]; then
-                    istatus_class="inode-critical"
-                elif [ "$iusage_percent" -ge "$server_warning_threshold" ]; then
-                    istatus_class="inode-warning"
-                fi
+                inodes_html+="<tr class=\"$istatus_class\"><td>$mount_point</td><td>$filesystem</td><td>$inodes</td><td>$iused</td><td>$ifree</td><td>$iusage_percent%</td></tr>\n"
             else
-                log "AVERTISSEMENT: Impossible d'extraire le pourcentage d'utilisation des inodes pour $server:$partition (valeur: $iusage_str)"
-                iusage_percent="N/A"
-                istatus_class="inode-normal"
+                inodes_html+="<tr class=\"inode-critical\"><td colspan=\"6\">Erreur lors de la vérification des inodes de $partition sur $display_name</td></tr>\n"
             fi
+        done
 
-            inodes_html+="<tr class=\"$istatus_class\"><td>$mount_point</td><td>$filesystem</td><td>$inodes</td><td>$iused</td><td>$ifree</td><td>$iusage_percent%</td></tr>\n"
+        inodes_html+="</table>\n"
+
+        # Ajouter les informations sur les inodes au rapport seulement si nécessaire
+        if $display_inodes; then
+            log "Affichage des informations sur les inodes pour $display_name (utilisation ≥ 50%)"
+            echo -e "$inodes_html" >>"$TEMP_DIR/report.html"
         else
-            inodes_html+="<tr class=\"inode-critical\"><td colspan=\"6\">Erreur lors de la vérification des inodes de $partition sur $server</td></tr>\n"
+            log "Omission des informations sur les inodes pour $display_name (utilisation < 50%)"
         fi
-    done
-
-    inodes_html+="</table>\n"
-
-    # Ajouter les informations sur les inodes au rapport seulement si nécessaire
-    if $display_inodes; then
-        log "Affichage des informations sur les inodes pour $server (utilisation ≥ 50%)"
-        echo -e "$inodes_html" >>"$TEMP_DIR/report.html"
     else
-        log "Omission des informations sur les inodes pour $server (utilisation < 50%)"
+        # macOS - les inodes sont traités différemment
+        log "Inodes sur macOS: gestion différente - affichage omis"
     fi
 
     # Vérifier si le serveur est exclu des calculs intensifs
-    if is_server_excluded "$server"; then
-        log "Le serveur $server est exclu des calculs des grands répertoires et fichiers"
-        echo "<h3>Calculs intensifs: Le serveur $server est exclu des calculs des grands répertoires et fichiers</h3>" >>"$TEMP_DIR/report.html"
+    if is_server_excluded "$server_name"; then
+        log "Le serveur $display_name est exclu des calculs des grands répertoires et fichiers"
+        echo "<h3>Calculs intensifs: Le serveur $display_name est exclu des calculs des grands répertoires et fichiers</h3>" >>"$TEMP_DIR/report.html"
     else
-        # Vérifier si on doit calculer les grands répertoires aujourd'hui pour ce serveur
-        if $CALC_BIG_DIRS && check_big_dirs_calculation "$server"; then
-            echo "<h3>Les plus grands répertoires de $server (calculés le $DATE)</h3>" >>"$TEMP_DIR/report.html"
+        # Gestion des grands répertoires
+        if $CALC_BIG_DIRS && check_big_dirs_calculation "$server_name"; then
+            echo "<h3>Les plus grands répertoires de $display_name (calculés le $DATE)</h3>" >>"$TEMP_DIR/report.html"
             echo "<div class=\"big-dirs\">" >>"$TEMP_DIR/report.html"
             echo "<pre>" >>"$TEMP_DIR/report.html"
 
             # Calculer les N plus grands répertoires pour chaque partition
-            for partition in $partitions; do
+            IFS=',' read -ra PARTITION_ARRAY <<< "$partitions"
+            for partition in "${PARTITION_ARRAY[@]}"; do
+                # Supprimer les espaces éventuels
+                partition=$(echo "$partition" | tr -d '[:space:]')
+                
+                # Ignorer les partitions vides
+                if [[ -z "$partition" ]]; then
+                    continue
+                fi
+                
                 echo "Partition: $partition" >>"$TEMP_DIR/report.html"
-                local big_dirs=$(ssh "$server" "find $partition -type d -exec du -sh {} \; 2>/dev/null | sort -rh | head -$NUM_BIG_DIRS")
+                
+                # Commande adaptée selon l'OS
+                local big_dirs=""
+                if [[ "$os_type" == "Darwin" ]]; then
+                    # Version macOS
+                    big_dirs=$($ssh_cmd "find $partition -type d -not -path '*/\.*' -exec du -sh {} \; 2>/dev/null | sort -hr | head -$NUM_BIG_DIRS")
+                else
+                    # Version Linux
+                    big_dirs=$($ssh_cmd "find $partition -type d -exec du -sh {} \; 2>/dev/null | sort -rh | head -$NUM_BIG_DIRS")
+                fi
 
                 if [ $? -eq 0 ] && [ ! -z "$big_dirs" ]; then
                     echo "$big_dirs" >>"$TEMP_DIR/report.html"
 
                     # Sauvegarder les résultats pour les utiliser plus tard
-                    echo "Serveur: $server, Partition: $partition, Date: $DATE (Répertoires)" >>"$BIG_DIRS_FILE.new"
+                    echo "Serveur: $display_name, Partition: $partition, Date: $DATE (Répertoires)" >>"$BIG_DIRS_FILE.new"
                     echo "$big_dirs" >>"$BIG_DIRS_FILE.new"
                     echo "----------------------------------------" >>"$BIG_DIRS_FILE.new"
                 else
-                    echo "Erreur lors du calcul des grands répertoires pour $partition sur $server" >>"$TEMP_DIR/report.html"
+                    echo "Erreur lors du calcul des grands répertoires pour $partition sur $display_name" >>"$TEMP_DIR/report.html"
                 fi
                 echo "" >>"$TEMP_DIR/report.html"
             done
@@ -2200,12 +2509,12 @@ check_disk_space() {
         elif $CALC_BIG_DIRS; then
             # Utiliser les données sauvegardées
             if [ -f "$BIG_DIRS_FILE" ]; then
-                echo "<h3>Les plus grands répertoires de $server (dernière mise à jour: $(stat -c %y "$BIG_DIRS_FILE" | cut -d' ' -f1))</h3>" >>"$TEMP_DIR/report.html"
+                echo "<h3>Les plus grands répertoires de $display_name (dernière mise à jour: $(stat -c %y "$BIG_DIRS_FILE" | cut -d' ' -f1))</h3>" >>"$TEMP_DIR/report.html"
                 echo "<div class=\"big-dirs\">" >>"$TEMP_DIR/report.html"
                 echo "<pre>" >>"$TEMP_DIR/report.html"
 
                 # Extraire uniquement les données pour ce serveur
-                extract_big_data "$server" "Répertoires" "$BIG_DIRS_FILE" >>"$TEMP_DIR/report.html"
+                extract_big_data "$server_name" "Répertoires" "$BIG_DIRS_FILE" >>"$TEMP_DIR/report.html"
 
                 echo "</pre>" >>"$TEMP_DIR/report.html"
                 echo "</div>" >>"$TEMP_DIR/report.html"
@@ -2217,25 +2526,43 @@ check_disk_space() {
         fi
 
         # Vérifier les plus grands fichiers pour ce serveur
-        if $CALC_BIG_FILES && check_big_files_calculation "$server"; then
-            echo "<h3>Les plus grands fichiers de $server (calculés le $DATE)</h3>" >>"$TEMP_DIR/report.html"
+        if $CALC_BIG_FILES && check_big_files_calculation "$server_name"; then
+            echo "<h3>Les plus grands fichiers de $display_name (calculés le $DATE)</h3>" >>"$TEMP_DIR/report.html"
             echo "<div class=\"big-dirs\">" >>"$TEMP_DIR/report.html"
             echo "<pre>" >>"$TEMP_DIR/report.html"
 
             # Calculer les N plus grands fichiers pour chaque partition
-            for partition in $partitions; do
+            IFS=',' read -ra PARTITION_ARRAY <<< "$partitions"
+            for partition in "${PARTITION_ARRAY[@]}"; do
+                # Supprimer les espaces éventuels
+                partition=$(echo "$partition" | tr -d '[:space:]')
+                
+                # Ignorer les partitions vides
+                if [[ -z "$partition" ]]; then
+                    continue
+                fi
+                
                 echo "Partition: $partition" >>"$TEMP_DIR/report.html"
-                local big_files=$(ssh "$server" "find $partition -type f -exec du -sh {} \; 2>/dev/null | sort -rh | head -$NUM_BIG_FILES")
+                
+                # Commande adaptée selon l'OS
+                local big_files=""
+                if [[ "$os_type" == "Darwin" ]]; then
+                    # Version macOS
+                    big_files=$($ssh_cmd "find $partition -type f -not -path '*/\.*' -exec du -sh {} \; 2>/dev/null | sort -hr | head -$NUM_BIG_FILES")
+                else
+                    # Version Linux
+                    big_files=$($ssh_cmd "find $partition -type f -exec du -sh {} \; 2>/dev/null | sort -rh | head -$NUM_BIG_FILES")
+                fi
 
                 if [ $? -eq 0 ] && [ ! -z "$big_files" ]; then
                     echo "$big_files" >>"$TEMP_DIR/report.html"
 
                     # Sauvegarder les résultats pour les utiliser plus tard
-                    echo "Serveur: $server, Partition: $partition, Date: $DATE (Fichiers)" >>"$BIG_FILES_FILE.new"
+                    echo "Serveur: $display_name, Partition: $partition, Date: $DATE (Fichiers)" >>"$BIG_FILES_FILE.new"
                     echo "$big_files" >>"$BIG_FILES_FILE.new"
                     echo "----------------------------------------" >>"$BIG_FILES_FILE.new"
                 else
-                    echo "Erreur lors du calcul des grands fichiers pour $partition sur $server" >>"$TEMP_DIR/report.html"
+                    echo "Erreur lors du calcul des grands fichiers pour $partition sur $display_name" >>"$TEMP_DIR/report.html"
                 fi
                 echo "" >>"$TEMP_DIR/report.html"
             done
@@ -2245,12 +2572,12 @@ check_disk_space() {
         elif $CALC_BIG_FILES; then
             # Utiliser les données sauvegardées
             if [ -f "$BIG_FILES_FILE" ]; then
-                echo "<h3>Les plus grands fichiers de $server (dernière mise à jour: $(stat -c %y "$BIG_FILES_FILE" | cut -d' ' -f1))</h3>" >>"$TEMP_DIR/report.html"
+                echo "<h3>Les plus grands fichiers de $display_name (dernière mise à jour: $(stat -c %y "$BIG_FILES_FILE" | cut -d' ' -f1))</h3>" >>"$TEMP_DIR/report.html"
                 echo "<div class=\"big-dirs\">" >>"$TEMP_DIR/report.html"
                 echo "<pre>" >>"$TEMP_DIR/report.html"
 
                 # Extraire uniquement les données pour ce serveur
-                extract_big_data "$server" "Fichiers" "$BIG_FILES_FILE" >>"$TEMP_DIR/report.html"
+                extract_big_data "$server_name" "Fichiers" "$BIG_FILES_FILE" >>"$TEMP_DIR/report.html"
 
                 echo "</pre>" >>"$TEMP_DIR/report.html"
                 echo "</div>" >>"$TEMP_DIR/report.html"
@@ -2278,19 +2605,74 @@ done
 # Traiter les options
 while [[ $# -gt 0 ]]; do
     case $1 in
+    -c | --critical)
+        if [[ $2 =~ ^[0-9]+$ ]] && [ $2 -ge 0 ] && [ $2 -le 100 ]; then
+            CRITICAL_THRESHOLD=$2
+            log "Seuil critique défini à $CRITICAL_THRESHOLD%"
+            shift # passe à l'argument suivant
+        else
+            echo "Erreur: l'option -c nécessite un nombre entier entre 0 et 100."
+            exit 1
+        fi
+        ;;
+    -C | --critical-email)
+        if [[ $2 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            CRITICAL_EMAIL=$2
+            log "Email pour les alertes de niveau critique défini à $CRITICAL_EMAIL"
+            shift # passe à l'argument suivant
+        else
+            echo "Erreur: l'option -C/--critical-email nécessite une adresse email valide."
+            exit 1
+        fi
+        ;;
+    -d | --dirs)
+        CALC_BIG_DIRS=true
+        log "Calcul des grands répertoires activé"
+        ;;
+    --days)
+        if [[ $2 =~ ^[0-9]+$ ]]; then
+            CALC_DAYS=$2
+            log "Nombre de jours avant recalcul défini à $CALC_DAYS"
+            shift # passe à l'argument suivant
+        else
+            echo "Erreur: l'option --days nécessite un nombre entier."
+            exit 1
+        fi
+        ;;
+    -E | --exclude-servers)
+        EXCLUDED_SERVERS="$2"
+        log "Serveurs exclus des calculs intensifs: $EXCLUDED_SERVERS"
+        shift # passe à l'argument suivant
+        ;;
+    -f | --files)
+        CALC_BIG_FILES=true
+        log "Calcul des grands fichiers activé"
+        ;;
+    -F | --num-big-files)
+        if [[ $2 =~ ^[0-9]+$ ]]; then
+            NUM_BIG_FILES=$2
+            log "Nombre de grands fichiers à afficher défini à $NUM_BIG_FILES"
+            shift # passe à l'argument suivant
+        else
+            echo "Erreur: l'option -F nécessite un nombre entier."
+            exit 1
+        fi
+        ;;
     -h | --help)
         show_help
         ;;
-    -V | --version)
-        show_version
+    -I | --info-email)
+        if [[ $2 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            INFO_EMAIL=$2
+            log "Email pour les rapports sans alerte défini à $INFO_EMAIL"
+            shift # passe à l'argument suivant
+        else
+            echo "Erreur: l'option -I/--info-email nécessite une adresse email valide."
+            exit 1
+        fi
         ;;
-    -r | --rotate-logs)
-        LOG_ROTATION_ENABLED=true
-        log "Rotation des logs activée"
-        ;;
-    -R | --no-rotate-logs)
-        LOG_ROTATION_ENABLED=false
-        log "Rotation des logs désactivée"
+    -l | --list-server)
+        list_servers
         ;;
     -m | --max-logs)
         if [[ $2 =~ ^[0-9]+$ ]]; then
@@ -2299,6 +2681,25 @@ while [[ $# -gt 0 ]]; do
             shift # passe à l'argument suivant
         else
             echo "Erreur: l'option --max-logs nécessite un nombre entier."
+            exit 1
+        fi
+        ;;
+    -M | --mail-big-files)
+        MAIL_BIG_FILES=true
+        SKIP_STANDARD_REPORT=true
+        if [[ $2 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            BIG_FILES_EMAIL=$2
+            log "Email pour l'envoi des plus gros fichiers défini à $BIG_FILES_EMAIL"
+            shift # passe à l'argument suivant
+        fi
+        ;;
+    -n | --num-big-dirs)
+        if [[ $2 =~ ^[0-9]+$ ]]; then
+            NUM_BIG_DIRS=$2
+            log "Nombre de grands répertoires à afficher défini à $NUM_BIG_DIRS"
+            shift # passe à l'argument suivant
+        else
+            echo "Erreur: l'option -n nécessite un nombre entier."
             exit 1
         fi
         ;;
@@ -2315,13 +2716,51 @@ while [[ $# -gt 0 ]]; do
                 ;;
         esac
         ;;
-    -x | --compress-logs)
-        LOG_ROTATION_COMPRESS=true
-        log "Compression des logs activée"
+    -P | --mail-big-dirs)
+        MAIL_BIG_DIRS=true
+        SKIP_STANDARD_REPORT=true
+        if [[ $2 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            BIG_DIRS_EMAIL=$2
+            log "Email pour l'envoi des plus gros répertoires défini à $BIG_DIRS_EMAIL"
+            shift # passe à l'argument suivant
+        fi
         ;;
-    -X | --no-compress-logs)
-        LOG_ROTATION_COMPRESS=false
-        log "Compression des logs désactivée"
+    -r | --rotate-logs)
+        LOG_ROTATION_ENABLED=true
+        log "Rotation des logs activée"
+        ;;
+    -R | --no-rotate-logs)
+        LOG_ROTATION_ENABLED=false
+        log "Rotation des logs désactivée"
+        ;;
+    -s | --simulate)
+        SIMULATION_MODE=true
+        log "Mode simulation activé : toutes les partitions seront considérées comme ayant 95% d'utilisation"
+        ;;
+    -S | --skip-normal)
+        SKIP_NORMAL_MAIL=true
+        log "Mode sans mail pour rapports normaux activé"
+        ;;
+    -t | --test)
+        # Déjà traité au début, ne rien faire ici
+        ;;
+    -T | --timing)
+        SHOW_SERVER_TIMING=true
+        log "Affichage du temps de traitement par serveur activé"
+        ;;
+    -u | --usage-sort-asc)
+        SHOW_USAGE_SORTED="asc"
+        log "Affichage de l'utilisation triée par ordre croissant activé"
+        ;;
+    -U | --usage-sort-desc)
+        SHOW_USAGE_SORTED="desc"
+        log "Affichage de l'utilisation triée par ordre décroissant activé"
+        ;;
+    -v | --verbose)
+        VERBOSE=true
+        ;;
+    -V | --version)
+        show_version
         ;;
     -w | --warning)
         if [[ $2 =~ ^[0-9]+$ ]] && [ $2 -ge 0 ] && [ $2 -le 100 ]; then
@@ -2330,83 +2769,6 @@ while [[ $# -gt 0 ]]; do
             shift # passe à l'argument suivant
         else
             echo "Erreur: l'option -w nécessite un nombre entier entre 0 et 100."
-            exit 1
-        fi
-        ;;
-    -S | --skip-normal)
-            SKIP_NORMAL_MAIL=true
-            log "Mode sans mail pour rapports normaux activé"
-        ;;
-    -c | --critical)
-        if [[ $2 =~ ^[0-9]+$ ]] && [ $2 -ge 0 ] && [ $2 -le 100 ]; then
-            CRITICAL_THRESHOLD=$2
-            log "Seuil critique défini à $CRITICAL_THRESHOLD%"
-            shift # passe à l'argument suivant
-        else
-            echo "Erreur: l'option -c nécessite un nombre entier entre 0 et 100."
-            exit 1
-        fi
-        ;;
-     -E | --exclude-servers)
-        EXCLUDED_SERVERS="$2"
-        log "Serveurs exclus des calculs intensifs: $EXCLUDED_SERVERS"
-        shift # passe à l'argument suivant
-        ;;
-     -l | --list-server)
-        list_servers
-        ;;
-    -T | --timing)
-        SHOW_SERVER_TIMING=true
-        log "Affichage du temps de traitement par serveur activé"
-        ;;
-    -v | --verbose)
-        VERBOSE=true
-        ;;
-    -n | --num-big-dirs)
-        if [[ $2 =~ ^[0-9]+$ ]]; then
-            NUM_BIG_DIRS=$2
-            log "Nombre de grands répertoires à afficher défini à $NUM_BIG_DIRS"
-            shift # passe à l'argument suivant
-        else
-            echo "Erreur: l'option -n nécessite un nombre entier."
-            exit 1
-        fi
-        ;;
-    -f | --num-big-files)
-        if [[ $2 =~ ^[0-9]+$ ]]; then
-            NUM_BIG_FILES=$2
-            log "Nombre de grands fichiers à afficher défini à $NUM_BIG_FILES"
-            shift # passe à l'argument suivant
-        else
-            echo "Erreur: l'option -f nécessite un nombre entier."
-            exit 1
-        fi
-        ;;
-    -d | --days)
-        if [[ $2 =~ ^[0-9]+$ ]]; then
-            CALC_DAYS=$2
-            log "Nombre de jours avant recalcul défini à $CALC_DAYS"
-            shift # passe à l'argument suivant
-        else
-            echo "Erreur: l'option -d nécessite un nombre entier."
-            exit 1
-        fi
-        ;;
-    -D | --no-dirs)
-        CALC_BIG_DIRS=false
-        log "Calcul des grands répertoires désactivé"
-        ;;
-    -F | --no-files)
-        CALC_BIG_FILES=false
-        log "Calcul des grands fichiers désactivé"
-        ;;
-    -I | --info-email)
-        if [[ $2 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-            INFO_EMAIL=$2
-            log "Email pour les rapports sans alerte défini à $INFO_EMAIL"
-            shift # passe à l'argument suivant
-        else
-            echo "Erreur: l'option -I/--info-email nécessite une adresse email valide."
             exit 1
         fi
         ;;
@@ -2420,15 +2782,13 @@ while [[ $# -gt 0 ]]; do
             exit 1
         fi
         ;;
-    -C | --critical-email)
-        if [[ $2 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-            CRITICAL_EMAIL=$2
-            log "Email pour les alertes de niveau critique défini à $CRITICAL_EMAIL"
-            shift # passe à l'argument suivant
-        else
-            echo "Erreur: l'option -C/--critical-email nécessite une adresse email valide."
-            exit 1
-        fi
+    -x | --compress-logs)
+        LOG_ROTATION_COMPRESS=true
+        log "Compression des logs activée"
+        ;;
+    -X | --no-compress-logs)
+        LOG_ROTATION_COMPRESS=false
+        log "Compression des logs désactivée"
         ;;
     -z | --zero-calc)
         # Réinitialiser le calcul des plus grands répertoires et fichiers et quitter
@@ -2444,42 +2804,18 @@ while [[ $# -gt 0 ]]; do
         echo "Réinitialisation terminée. Le recalcul sera effectué lors de la prochaine exécution du script."
         exit 0
         ;;
-    -s | --simulate)
-        SIMULATION_MODE=true
-        log "Mode simulation activé : toutes les partitions seront considérées comme ayant 95% d'utilisation"
-        ;;
-    -M | --mail-big-files)
-        MAIL_BIG_FILES=true
-        SKIP_STANDARD_REPORT=true
-        if [[ $2 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-            BIG_FILES_EMAIL=$2
-            log "Email pour l'envoi des plus gros fichiers défini à $BIG_FILES_EMAIL"
-            shift # passe à l'argument suivant
-        fi
-        ;;
-    -P | --mail-big-dirs)
-        MAIL_BIG_DIRS=true
-        SKIP_STANDARD_REPORT=true
-        if [[ $2 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-            BIG_DIRS_EMAIL=$2
-            log "Email pour l'envoi des plus gros répertoires défini à $BIG_DIRS_EMAIL"
-            shift # passe à l'argument suivant
-        fi
-        ;;
-    -u | --usage-sort-asc)
-        SHOW_USAGE_SORTED="asc"
-        log "Affichage de l'utilisation triée par ordre croissant activé"
-        ;;
-    -U | --usage-sort-desc)
-        SHOW_USAGE_SORTED="desc"
-        log "Affichage de l'utilisation triée par ordre décroissant activé"
-        ;;
     -Z | --validate-config)
         VALIDATION_MODE=true
         log "Mode validation: vérification de la configuration activée"
         ;;
-    -t | --test)
-        # Déjà traité, ne rien faire ici
+    # Gestion des anciennes options obsolètes pour faciliter la migration
+    -D | --no-dirs)
+        echo "AVERTISSEMENT: L'option -D/--no-dirs est obsolète. Les calculs des grands répertoires sont maintenant désactivés par défaut."
+        echo "Utilisez -d/--dirs pour les activer si nécessaire."
+        ;;
+    -F | --no-files)
+        echo "AVERTISSEMENT: L'option -F/--no-files est obsolète. Les calculs des grands fichiers sont maintenant désactivés par défaut."
+        echo "Utilisez -f/--files pour les activer si nécessaire."
         ;;
     *)
         echo "Option inconnue: $1"
@@ -2548,7 +2884,7 @@ cat >"$TEMP_DIR/report.html" <<EOF
 </head>
 <body>
     <h1>Rapport d'espace disque - $DATE $TIME</h1>
-    <p>Généré par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME</p>
+    <p>Généré par $SCRIPT_NAME version $VERSION sur le serveur $HOSTNAME avec la commande $FULL_COMMAND</p>
     <p><em>Note: Des seuils personnalisés peuvent être définis pour chaque serveur dans le fichier de configuration.</em></p>
 EOF
 
@@ -2627,57 +2963,61 @@ log "Nombre de serveurs à traiter: ${#sorted_servers[@]}"
 # Déclarer le tableau associatif pour stocker les temps de traitement des serveurs
 declare -A server_timings
 
-
 # Parcourir le tableau des serveurs triés
 for line in "${sorted_servers[@]}"; do
-    # Extraire le nom du serveur (avant le premier ':' s'il existe)
-    server=$(echo "$line" | cut -d':' -f1 | tr -d '[:space:]')
-
-    # Vérifier si le serveur est valide
-    if [[ -z "$server" ]]; then
+    # Extraire le nom du serveur et l'utilisateur SSH
+    server_info=$(extract_server_info "$line")
+    server_name=$(echo "$server_info" | cut -d' ' -f1)
+    ssh_user=$(echo "$server_info" | cut -d' ' -f2)
+    
+    if [[ -z "$server_name" ]]; then
         log "AVERTISSEMENT: Nom de serveur vide ignoré"
         continue
     fi
-    # Ajouter un saut de ligne avant le traitement de chaque serveur en mode verbose
-    if $VERBOSE; then
-        echo "" # Saut de ligne supplémentaire
-    fi
-    log "Traitement du serveur: '$server'"
 
+    # Utiliser la fonction pour générer le nom d'affichage
+    display_name=$(build_display_name "$server_name" "$ssh_user")
+    
+    # Ajouter un saut de ligne en mode verbose
+    if $VERBOSE; then
+        echo ""
+    fi
+    
+    log "Traitement du serveur: '$display_name'"
+    
     # Enregistrer l'heure de début pour ce serveur
     if $SHOW_SERVER_TIMING; then
         server_start_time=$(date +%s)
     fi
     
     # Vérifier si le serveur est accessible par ping
-    if ! check_server_reachable "$server"; then
-        log "ERREUR: Le serveur $server n'est pas accessible, vérification ignorée"
-        echo "<h2>Serveur: $server</h2>" >>"$TEMP_DIR/report.html"
+    if ! check_server_reachable "$line"; then
+        log "ERREUR: Le serveur $display_name n'est pas accessible, vérification ignorée"
+        echo "<h2>Serveur: $display_name</h2>" >>"$TEMP_DIR/report.html"
         echo "<p class=\"critical\">Le serveur n'est pas accessible par ping</p>" >>"$TEMP_DIR/report.html"
         continue
     fi
-
-    # Vérifier l'espace disque du serveur
-    check_disk_space "$server"
-
-    # Vérifier s'il y a des alertes
-    check_for_alerts "$server"
-
-    # Calcul du temps de traitement pour ce serveur
+    
+    # Vérifier l'espace disque du serveur (fonction adaptée)
+    check_disk_space "$line"
+    
+    # Vérifier s'il y a des alertes (fonction adaptée)
+    check_for_alerts "$line"
+    
+    # Calcul du temps de traitement
     if $SHOW_SERVER_TIMING; then
         server_end_time=$(date +%s)
         server_duration=$((server_end_time - server_start_time))
-        server_timings["$server"]=$server_duration
-    
-        # Afficher les temps de traitement dans les logs seulement si en mode verbose
+        server_timings["$display_name"]=$server_duration
+        
         if $VERBOSE; then
             server_duration_min=$((server_duration / 60))
             server_duration_sec=$((server_duration % 60))
-        
+            
             if [ $server_duration_min -gt 0 ]; then
-                log "Temps de traitement pour $server: $server_duration_min minute(s) et $server_duration_sec seconde(s)"
+                log "Temps de traitement pour $display_name: $server_duration_min minute(s) et $server_duration_sec seconde(s)"
             else
-                log "Temps de traitement pour $server: $server_duration_sec seconde(s)"
+                log "Temps de traitement pour $display_name: $server_duration_sec seconde(s)"
             fi
         fi
     fi
