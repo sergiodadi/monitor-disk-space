@@ -2,7 +2,7 @@
 monitor-disk-space.sh - Surveillance de l'espace disque sur plusieurs serveurs via SSH avec alertes par email
 # Disk Space Monitor
 
-Version: 2.6
+Version: 2.6.10
 
 ## Description
 Script de surveillance d'espace disque pour serveurs Linux. Vérifie l'espace disque sur plusieurs serveurs via SSH et envoie des alertes par email.
